@@ -50,6 +50,8 @@ agent-browser/
 *.pem
 privvy*
 images/
+!docs/images/
+!docs/images/**
 __pycache__/
 hermes_agent.egg-info/
 wandb/

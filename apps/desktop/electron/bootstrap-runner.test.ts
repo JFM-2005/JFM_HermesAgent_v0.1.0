@@ -59,14 +59,15 @@ test('resolveInstallScript prefers a cached script without touching the network'
 
   try {
     const commit = 'a'.repeat(40)
-    const cached = cachedScriptPath(home, commit)
+    const repo = 'JFM-2005/JFM_HermesAgent_v0.1.0'
+    const cached = cachedScriptPath(home, commit, repo)
     fs.mkdirSync(path.dirname(cached), { recursive: true })
     fs.writeFileSync(cached, '#!/bin/sh\necho cached\n')
 
     const logs = []
 
     const result = await resolveInstallScript({
-      installStamp: { commit },
+      installStamp: { commit, repository: repo },
       sourceRepoRoot: null,
       hermesHome: home,
       emit: ev => logs.push(ev)
@@ -84,6 +85,7 @@ test('resolveInstallScript falls back to the installed agent checkout on a 404',
 
   try {
     const commit = 'a'.repeat(40)
+    const repo = 'JFM-2005/JFM_HermesAgent_v0.1.0'
     // Seed the installed agent checkout so the fallback has something to resolve.
     const scriptsDir = path.join(home, 'hermes-agent', 'scripts')
     fs.mkdirSync(scriptsDir, { recursive: true })
@@ -93,9 +95,10 @@ test('resolveInstallScript falls back to the installed agent checkout on a 404',
     const logs = []
 
     const result = await resolveInstallScript({
-      installStamp: { commit },
+      installStamp: { commit, repository: repo },
       sourceRepoRoot: null,
       hermesHome: home,
+      isPackaged: true,
       emit: ev => logs.push(ev),
       // Simulate GitHub returning a 404 for the pinned commit.
       _download: async () => {
@@ -104,8 +107,7 @@ test('resolveInstallScript falls back to the installed agent checkout on a 404',
     })
 
     assert.equal(result.source, 'installed-agent')
-    // It should have copied the installer into the bootstrap cache.
-    assert.equal(result.path, cachedScriptPath(home, commit))
+    assert.equal(result.path, cachedScriptPath(home, commit, repo))
     assert.ok(fs.existsSync(result.path), 'fallback script copied into cache')
     assert.ok(
       logs.some(ev => /falling back to installed agent/.test(ev.line || '')),
@@ -121,12 +123,14 @@ test('resolveInstallScript rethrows when the 404 fallback is unavailable', async
 
   try {
     const commit = 'a'.repeat(40)
+    const repo = 'JFM-2005/JFM_HermesAgent_v0.1.0'
     // No installed agent checkout seeded -> nothing to fall back to.
     await assert.rejects(
       resolveInstallScript({
-        installStamp: { commit },
+        installStamp: { commit, repository: repo },
         sourceRepoRoot: null,
         hermesHome: home,
+        isPackaged: true,
         emit: () => {},
         _download: async () => {
           throw new Error('Failed to download install.sh: HTTP 404')

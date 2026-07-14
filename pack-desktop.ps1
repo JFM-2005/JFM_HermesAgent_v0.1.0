@@ -1,30 +1,21 @@
 <#
 .SYNOPSIS
-    Build Windows portable (green) Hermes Desktop — adapted for JFM_HermesAgent.
+    Build Windows single-exe portable Hermes Desktop (teacher-style green build).
 
 .DESCRIPTION
-    Teacher workflow equivalent:
-      npm ci
-      uv sync --locked
-      npm run desktop:package:portable:win
+    Produces one self-contained exe:
+      apps\desktop\release\Hermes-Portable-<version>-<arch>.exe
 
-    This script adds preflight checks for our portable setup:
-      - proxy / Electron mirrors (China network)
-      - close running Hermes.exe / electron.exe (Access denied)
-      - GITHUB_SHA fallback (build stamp)
-      - Windows icon.ico format (BMP/DIB, not PNG-in-ICO)
-      - CSC_IDENTITY_AUTO_DISCOVERY=false (avoid winCodeSign symlink trap)
+    First launch:
+      - Creates data\hermes beside the exe (HERMES_HOME)
+      - Bootstraps Python runtime + clones JFM_HermesAgent from GitHub
+      - Falls back to bundled install.ps1 if raw.githubusercontent.com is blocked
 
-    Output:
-      apps\desktop\release\win-unpacked\Hermes.exe
-
-    Run the packaged app with workspace config:
-      .\start-desktop-pack.ps1
+    Requires network (TUN/proxy) on first run for git clone / uv downloads.
 
 .EXAMPLE
     .\pack-desktop.ps1
     .\pack-desktop.ps1 -SkipDeps
-    .\pack-desktop.ps1 -SkipProxy
 #>
 
 [CmdletBinding()]
@@ -38,7 +29,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $DesktopDir = Join-Path $Root 'apps\desktop'
-$ReleaseExe = Join-Path $DesktopDir 'release\win-unpacked\Hermes.exe'
+$ReleaseDir = Join-Path $DesktopDir 'release'
 $LogTag = '[pack-desktop]'
 
 function Write-Log {
@@ -50,17 +41,13 @@ function Write-Step([string]$Message) { Write-Log $Message Cyan }
 
 function Stop-DesktopLockingProcesses {
     $names = @('Hermes', 'electron')
-    $stopped = @()
     foreach ($name in $names) {
         Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
             Write-Log "stopping $($_.ProcessName) (pid $($_.Id))" Yellow
             Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-            $stopped += $_.ProcessName
         }
     }
-    if ($stopped.Count -gt 0) {
-        Start-Sleep -Seconds 2
-    }
+    Start-Sleep -Seconds 1
 }
 
 function Test-WindowsIconIco {
@@ -148,16 +135,26 @@ with open(out, 'wb') as f:
 print('repaired', out)
 '@
     & python -c $code $assetsDir
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log 'icon auto-repair failed (need: pip install pillow)' Red
-        return $false
-    }
-    return $true
+    return ($LASTEXITCODE -eq 0)
 }
 
-# --- 0. portable env (for hermes CLI if used later) ---
-$env:HERMES_HOME = Join-Path $Root 'workspace'
-$env:HERMES_DESKTOP_HERMES_ROOT = $Root
+function Get-GitHeadSha {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { return $null }
+    $sha = & git -C $Root rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $sha.Trim()
+}
+
+function Get-GitHeadBranch {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { return 'master' }
+    $branch = & git -C $Root rev-parse --abbrev-ref HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $branch -or $branch -eq 'HEAD') {
+        return 'master'
+    }
+    return $branch.Trim()
+}
 
 # --- 1. toolchain ---
 Write-Step 'preflight: toolchain'
@@ -167,13 +164,12 @@ foreach ($cmd in @('node', 'npm')) {
     }
 }
 Write-Log "node = $(node -v)" DarkGray
-Write-Log "npm  = $(npm -v)" DarkGray
 
 # --- 2. close locking processes ---
 Write-Step 'preflight: stop running Hermes / electron'
 Stop-DesktopLockingProcesses
 
-# --- 3. icon.ico (Windows taskbar / rcedit) ---
+# --- 3. icon.ico ---
 Write-Step 'preflight: validate assets\icon.ico'
 $iconPath = Join-Path $DesktopDir 'assets\icon.ico'
 $iconCheck = Test-WindowsIconIco -IcoPath $iconPath
@@ -183,11 +179,10 @@ if (-not $iconCheck.ok) {
         $iconCheck = Test-WindowsIconIco -IcoPath $iconPath
     }
 }
-if ($iconCheck.ok) {
-    Write-Log $iconCheck.message Green
-} else {
-    throw "icon.ico invalid: $($iconCheck.message). Copy a working BMP/DIB icon.ico into apps\desktop\assets\."
+if (-not $iconCheck.ok) {
+    throw "icon.ico invalid: $($iconCheck.message)"
 }
+Write-Log $iconCheck.message Green
 
 # --- 4. network mirrors ---
 if (-not $SkipProxy) {
@@ -198,16 +193,20 @@ if (-not $SkipProxy) {
     $env:ELECTRON_BUILDER_BINARIES_MIRROR = 'https://npmmirror.com/mirrors/electron-builder-binaries/'
     $env:NPM_CONFIG_REGISTRY = 'https://registry.npmmirror.com'
     Write-Log "proxy = $proxy" DarkGray
-    Write-Log "ELECTRON_MIRROR = $($env:ELECTRON_MIRROR)" DarkGray
 }
 
-# --- 5. build stamp ---
-if (-not $env:GITHUB_SHA) {
-    $env:GITHUB_SHA = '0000000000000000000000000000000000000000'
-    Write-Log 'GITHUB_SHA fallback set (no git commit)' DarkGray
+# --- 5. build stamp (git commit + JFM repo) ---
+$headSha = Get-GitHeadSha
+if ($headSha) {
+    $env:GITHUB_SHA = $headSha
+    $env:GITHUB_REF_NAME = Get-GitHeadBranch
+    Write-Log "GITHUB_SHA = $($headSha.Substring(0, 12)) ($($env:GITHUB_REF_NAME))" DarkGray
+} else {
+    Write-Log 'WARN: git HEAD not found; write-build-stamp may fail' Yellow
 }
+$env:HERMES_BUILD_REPOSITORY = 'JFM-2005/JFM_HermesAgent_v0.1.0'
 
-# --- 6. signing trap (Windows) ---
+# --- 6. signing trap ---
 $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 
 # --- 7. npm ci ---
@@ -223,59 +222,48 @@ if (-not $SkipDeps) {
         $ErrorActionPreference = $prevEAP
         Pop-Location
     }
-    Write-Log 'npm ci OK' Green
-} else {
-    Write-Log 'skipped npm ci (-SkipDeps)' DarkGray
 }
 
-# --- 8. uv sync (Python backend; teacher step) ---
-if (-not $SkipUv) {
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
-    if ($uv) {
-        Write-Step 'uv sync --locked'
-        Push-Location $Root
-        $prevEAP = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            & uv sync --locked
-            if ($LASTEXITCODE -ne 0) { throw "uv sync --locked failed (exit $LASTEXITCODE)" }
-        } finally {
-            $ErrorActionPreference = $prevEAP
-            Pop-Location
-        }
-        Write-Log 'uv sync OK' Green
-    } else {
-        Write-Log 'WARN: uv not found; skip Python sync (desktop pack may still work)' Yellow
+# --- 8. uv sync (optional) ---
+if (-not $SkipUv -and (Get-Command uv -ErrorAction SilentlyContinue)) {
+    Write-Step 'uv sync --locked'
+    Push-Location $Root
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & uv sync --locked
+    } finally {
+        $ErrorActionPreference = $prevEAP
+        Pop-Location
     }
-} else {
-    Write-Log 'skipped uv sync (-SkipUv)' DarkGray
 }
 
-# --- 9. pack (teacher: npm run desktop:package:portable:win) ---
+# --- 9. pack portable single exe ---
 Write-Step 'npm run desktop:package:portable:win'
 Push-Location $Root
 $prevEAP = $ErrorActionPreference
 try {
     $ErrorActionPreference = 'Continue'
     & npm run desktop:package:portable:win
-    if ($LASTEXITCODE -ne 0) { throw "desktop pack failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "portable pack failed (exit $LASTEXITCODE)" }
 } finally {
     $ErrorActionPreference = $prevEAP
     Pop-Location
 }
 
 # --- 10. verify output ---
-if (-not (Test-Path $ReleaseExe)) {
-    throw "pack finished but missing: $ReleaseExe"
+$portableExe = Get-ChildItem -Path $ReleaseDir -Filter 'Hermes-Portable-*.exe' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if (-not $portableExe) {
+    throw "pack finished but no Hermes-Portable-*.exe found under $ReleaseDir"
 }
 
-$sizeMb = [math]::Round((Get-Item $ReleaseExe).Length / 1MB, 1)
+$sizeMb = [math]::Round($portableExe.Length / 1MB, 1)
 Write-Host ''
-Write-Log "SUCCESS: $ReleaseExe ($sizeMb MB)" Green
-Write-Log 'launch packaged app with portable workspace:' Cyan
-Write-Log '  .\start-desktop-pack.ps1' Cyan
-Write-Host ''
-Write-Log 'distribute: zip the entire folder' DarkGray
-Write-Log '  apps\desktop\release\win-unpacked\' DarkGray
-Write-Log 'do NOT commit: workspace\.env, sessions\, *.db' DarkGray
+Write-Log "SUCCESS: $($portableExe.FullName) ($sizeMb MB)" Green
+Write-Log 'distribute: copy this single exe anywhere and double-click' Cyan
+Write-Log 'first launch creates:  <exe-dir>\data\hermes\  (config + runtime)' DarkGray
+Write-Log 'first launch needs network (TUN/proxy) for bootstrap' Yellow
 Write-Host ''

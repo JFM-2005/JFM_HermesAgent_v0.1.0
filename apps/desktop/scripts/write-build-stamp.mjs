@@ -11,19 +11,11 @@
  *     "schemaVersion": 1,
  *     "commit":        "<40-char SHA>",
  *     "branch":        "<branch name>",
+ *     "repository":    "<GitHub owner/repo>",
  *     "builtAt":       "<ISO 8601 UTC timestamp>",
  *     "dirty":         true|false,
  *     "source":        "ci" | "local"
  *   }
- *
- * Source preference order:
- *   1. CI env vars ($GITHUB_SHA / $GITHUB_REF_NAME) -- avoid edge cases with
- *      shallow clones, detached HEADs, etc. in CI.
- *   2. Local `git rev-parse` against the parent repo (../..).
- *
- * Dev / out-of-repo builds without git produce an explicit error rather than
- * silently writing an unstamped manifest -- the packaged app refuses to
- * bootstrap without a stamp.
  */
 
 import { mkdirSync, writeFileSync } from "fs"
@@ -31,11 +23,21 @@ import { resolve, join, relative } from "path"
 import { execSync } from "child_process"
 
 const STAMP_SCHEMA_VERSION = 1
+const DEFAULT_REPOSITORY = "JFM-2005/JFM_HermesAgent_v0.1.0"
+const DEFAULT_BRANCH = "master"
 
 const DESKTOP_ROOT = resolve(import.meta.dirname, "..")
 const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..")
 const OUT_DIR = join(DESKTOP_ROOT, "build")
 const OUT_FILE = join(OUT_DIR, "install-stamp.json")
+
+function normalizeGitHubRepository(value) {
+  if (!value) return null
+  const raw = String(value).trim().replace(/^git\+/, "")
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) return raw.replace(/\.git$/i, "")
+  const match = raw.match(/github\.com[/:]([^/]+)\/([^/#]+?)(?:\.git)?$/i)
+  return match ? `${match[1]}/${match[2].replace(/\.git$/i, "")}` : null
+}
 
 function tryExec(cmd, opts) {
   try {
@@ -52,7 +54,11 @@ function fromCI() {
   return {
     commit: sha,
     branch: branch,
-    dirty: false, // CI builds from a checkout-of-ref by definition
+    repository:
+      normalizeGitHubRepository(process.env.HERMES_BUILD_REPOSITORY) ||
+      normalizeGitHubRepository(process.env.GITHUB_REPOSITORY) ||
+      DEFAULT_REPOSITORY,
+    dirty: false,
     source: "ci"
   }
 }
@@ -61,17 +67,16 @@ function fromLocalGit() {
   const sha = tryExec("git rev-parse HEAD", { cwd: REPO_ROOT })
   if (!sha) return null
   const branch = tryExec("git rev-parse --abbrev-ref HEAD", { cwd: REPO_ROOT })
-  // `git status --porcelain -uno` is empty iff tracked files match HEAD.
-  // We exclude untracked files (-uno) intentionally: a developer who's
-  // checked out an installer scratch dir alongside the repo shouldn't
-  // poison every local build with a [DIRTY] stamp.  We DO care about
-  // tracked-but-modified files because those mean the .exe content
-  // differs from the commit being pinned.
   const status = tryExec("git status --porcelain -uno", { cwd: REPO_ROOT })
+  const repository =
+    normalizeGitHubRepository(process.env.HERMES_BUILD_REPOSITORY) ||
+    normalizeGitHubRepository(tryExec("git remote get-url origin", { cwd: REPO_ROOT })) ||
+    DEFAULT_REPOSITORY
   const dirty = status !== null && status.length > 0
   return {
     commit: sha,
-    branch: branch === "HEAD" ? null : branch, // detached HEAD -> null
+    branch: branch === "HEAD" ? null : branch,
+    repository,
     dirty: dirty,
     source: "local"
   }
@@ -79,15 +84,13 @@ function fromLocalGit() {
 
 function main() {
   const stamp = fromCI() || fromLocalGit()
-  if (!stamp || !stamp.commit) {
+  if (stamp && !stamp.repository) {
+    stamp.repository = DEFAULT_REPOSITORY
+  }
+  if (!stamp || !stamp.commit || !stamp.repository) {
     console.error(
-      "[write-build-stamp] ERROR: could not determine git commit.\n" +
-        "  - $GITHUB_SHA not set\n" +
-        "  - `git rev-parse HEAD` failed at " +
-        REPO_ROOT +
-        "\n" +
-        "Packaged builds require a git ref to pin first-launch install.ps1\n" +
-        "against. Run from a git checkout or set $GITHUB_SHA explicitly."
+      "[write-build-stamp] ERROR: could not determine git commit and repository.\n" +
+        "  Run from a git checkout with origin remote, or set $GITHUB_SHA and $HERMES_BUILD_REPOSITORY."
     )
     process.exit(1)
   }
@@ -97,15 +100,15 @@ function main() {
       "[write-build-stamp] WARNING: working tree is dirty.\n" +
         "  Pinning to " +
         stamp.commit.slice(0, 12) +
-        " but the packaged code may differ from that commit.\n" +
-        "  Commit your changes before publishing this build."
+        " but the packaged code may differ from that commit."
     )
   }
 
   const payload = {
     schemaVersion: STAMP_SCHEMA_VERSION,
     commit: stamp.commit,
-    branch: stamp.branch,
+    branch: stamp.branch || DEFAULT_BRANCH,
+    repository: stamp.repository,
     builtAt: new Date().toISOString(),
     dirty: stamp.dirty,
     source: stamp.source
@@ -119,6 +122,8 @@ function main() {
       " -> " +
       stamp.commit.slice(0, 12) +
       (stamp.branch ? " (" + stamp.branch + ")" : "") +
+      " from " +
+      stamp.repository +
       (stamp.dirty ? " [DIRTY]" : "")
   )
 }

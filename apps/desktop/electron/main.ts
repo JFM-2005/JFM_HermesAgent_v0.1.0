@@ -125,13 +125,42 @@ import {
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
+import {
+  applyPortableEnvironment,
+  portableUpdateStatus,
+  resolvePortableMode,
+  shouldRegisterDeepLinkProtocol
+} from './portable-mode'
 
-const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
+const PORTABLE_MODE = resolvePortableMode()
+
+applyPortableEnvironment(PORTABLE_MODE)
+
+const USER_DATA_OVERRIDE =
+  process.env.HERMES_DESKTOP_USER_DATA_DIR || (PORTABLE_MODE.enabled ? PORTABLE_MODE.userDataDir : undefined)
 
 if (USER_DATA_OVERRIDE) {
   const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
   fs.mkdirSync(resolvedUserData, { recursive: true })
   app.setPath('userData', resolvedUserData)
+}
+
+const PORTABLE_PROBE_PATH = process.env.HERMES_DESKTOP_PORTABLE_PROBE?.trim()
+
+if (PORTABLE_MODE.enabled && PORTABLE_PROBE_PATH && path.isAbsolute(PORTABLE_PROBE_PATH)) {
+  fs.mkdirSync(path.dirname(PORTABLE_PROBE_PATH), { recursive: true })
+  fs.writeFileSync(
+    PORTABLE_PROBE_PATH,
+    JSON.stringify({
+      enabled: true,
+      executableDir: PORTABLE_MODE.executableDir,
+      dataDir: PORTABLE_MODE.dataDir,
+      hermesHome: process.env.HERMES_HOME,
+      userDataDir: app.getPath('userData'),
+      registerDeepLinkProtocol: shouldRegisterDeepLinkProtocol(PORTABLE_MODE)
+    })
+  )
+  app.exit(0)
 }
 
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
@@ -217,7 +246,7 @@ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 // build hasn't been invoked, or schema mismatch). Callers must handle null.
 //
 // Schema:
-//   { schemaVersion: 1, commit, branch, builtAt, dirty, source }
+//   { schemaVersion: 1, commit, branch, repository, builtAt, dirty, source }
 const INSTALL_STAMP_SCHEMA_VERSION = 1
 
 function loadInstallStamp() {
@@ -248,6 +277,10 @@ function loadInstallStamp() {
           schemaVersion: parsed.schemaVersion,
           commit: parsed.commit,
           branch: parsed.branch || null,
+          repository:
+            typeof parsed.repository === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(parsed.repository)
+              ? parsed.repository
+              : null,
           builtAt: parsed.builtAt || null,
           dirty: Boolean(parsed.dirty),
           source: parsed.source || null,
@@ -729,6 +762,7 @@ app.setName(APP_NAME)
 
 function resolveWindowsAppUserModelId() {
   const brandedId = 'com.nousresearch.hermes'
+  const devBrandedId = 'com.nousresearch.hermes.dev'
   // NSIS/MSI installs create a Start Menu shortcut whose AUMID matches build.appId.
   // Portable win-unpacked runs and dev `electron .` launches do not. Setting the
   // branded ID without that shortcut makes Windows show a blank taskbar icon
@@ -741,12 +775,37 @@ function resolveWindowsAppUserModelId() {
     'Programs',
     'Hermes.lnk'
   )
+  const devStartMenuShortcut = path.join(
+    app.getPath('appData'),
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+    'Hermes Dev.lnk'
+  )
 
   if (IS_PACKAGED && fs.existsSync(startMenuShortcut)) {
     return brandedId
   }
 
-  return process.execPath
+  const envAumid = process.env.HERMES_DESKTOP_APP_USER_MODEL_ID?.trim()
+  if (envAumid) {
+    return envAumid
+  }
+
+  if (!IS_PACKAGED && fs.existsSync(devStartMenuShortcut)) {
+    return devBrandedId
+  }
+
+  // Legacy fallback: only safe on ASCII-only install paths. Using a path with
+  // non-ASCII characters (common on zh-CN desktops under D:\生产实习\...) as the
+  // AUMID breaks taskbar icon resolution and leaves the stock Electron icon.
+  const execPath = process.execPath
+  if (/^[\x20-\x7E]+$/.test(execPath)) {
+    return execPath
+  }
+
+  return devBrandedId
 }
 
 // Windows toast notifications silently no-op unless an AppUserModelID is set:
@@ -3392,7 +3451,12 @@ function createActiveBackend(backendArgs) {
 function resolveHermesBackend(backendArgs) {
   // 1. Explicit override -- HERMES_DESKTOP_HERMES_ROOT points at a developer
   //    checkout. Honour it as-is (no bootstrap; the user is driving).
-  const overrideRoot = process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT)
+  //    Portable green builds must never pick up a nearby dev tree from the
+  //    environment — they bootstrap into data/hermes beside the launcher exe.
+  const overrideRoot =
+    !PORTABLE_MODE.enabled &&
+    process.env.HERMES_DESKTOP_HERMES_ROOT &&
+    path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT)
 
   if (overrideRoot && isHermesSourceRoot(overrideRoot)) {
     const backend = createPythonBackend(overrideRoot, `Hermes source at ${overrideRoot}`, backendArgs)
@@ -3599,6 +3663,7 @@ async function ensureRuntime(backend) {
       sourceRepoRoot: SOURCE_REPO_ROOT,
       hermesHome: HERMES_HOME,
       logRoot: path.join(HERMES_HOME, 'logs'),
+      isPackaged: IS_PACKAGED,
       abortSignal: bootstrapAbortController.signal,
       onEvent: ev => {
         // Tee every bootstrap event to (a) the desktop log for forensics
@@ -4487,13 +4552,13 @@ function closePreviewWatchers() {
   }
 }
 
-async function waitForHermes(baseUrl, token) {
+async function waitForHermes(baseUrl, _token) {
   const deadline = Date.now() + 45_000
   let lastError = null
 
   while (Date.now() < deadline) {
     try {
-      await fetchJson(`${baseUrl}/api/status`, token)
+      await fetchPublicJson(`${baseUrl}/api/status`, { timeoutMs: 8_000 })
 
       return
     } catch (error) {
@@ -8138,23 +8203,37 @@ ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
 })
 ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
-ipcMain.handle('hermes:updates:check', async () =>
-  checkUpdates().catch(error => ({
+ipcMain.handle('hermes:updates:check', async () => {
+  const portableStatus = portableUpdateStatus(PORTABLE_MODE)
+
+  if (portableStatus) {
+    return portableStatus
+  }
+
+  return checkUpdates().catch(error => ({
     supported: true,
     branch: readDesktopUpdateConfig().branch,
     error: 'check-failed',
     message: error?.message || String(error),
     fetchedAt: Date.now()
   }))
-)
+})
 
-ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  applyUpdates(payload || {}).catch(error => ({
+ipcMain.handle('hermes:updates:apply', async (_event, payload) => {
+  if (PORTABLE_MODE.enabled) {
+    return {
+      ok: false,
+      error: 'portable-build',
+      message: 'Replace the portable executable to update. The adjacent data folder is preserved.'
+    }
+  }
+
+  return applyUpdates(payload || {}).catch(error => ({
     ok: false,
     error: 'apply-failed',
     message: error?.message || String(error)
   }))
-)
+})
 
 ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig())
 
@@ -8208,7 +8287,8 @@ ipcMain.handle('hermes:version', async () => ({
   electronVersion: process.versions.electron,
   nodeVersion: process.versions.node,
   platform: process.platform,
-  hermesRoot: resolveUpdateRoot()
+  hermesRoot: resolveUpdateRoot(),
+  portable: PORTABLE_MODE.enabled
 }))
 
 // ===========================================================================
@@ -8304,6 +8384,14 @@ async function getUninstallSummary() {
 }
 
 async function runDesktopUninstall(mode) {
+  if (PORTABLE_MODE.enabled) {
+    return {
+      ok: false,
+      error: 'portable-build',
+      message: 'Exit Hermes, then delete the portable executable and its adjacent data folder.'
+    }
+  }
+
   let uninstallArgs
 
   try {
@@ -8561,7 +8649,13 @@ app.whenReady().then(() => {
   installMediaPermissions()
   registerMediaProtocol()
   installEmbedReferer()
-  registerDeepLinkProtocol()
+
+  if (shouldRegisterDeepLinkProtocol(PORTABLE_MODE)) {
+    registerDeepLinkProtocol()
+  } else {
+    rememberLog('[portable] skipped hermes:// protocol registration')
+  }
+
   ensureWslWindowsFonts()
   configureSpellChecker()
   registerPowerResumeListeners()

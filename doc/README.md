@@ -13,6 +13,14 @@
 | [original-readme/README.es.md](original-readme/README.es.md) | 西班牙语 |
 | [original-readme/README.ur-pk.md](original-readme/README.ur-pk.md) | 乌尔都语 |
 
+## 上游元数据（归档，不在 GitHub 首页展示）
+
+自仓库根目录移入 [upstream-meta/](upstream-meta/)，仅供查阅：
+
+- `CONTRIBUTING.md` — 上游贡献指南
+- `LICENSE` — 上游 MIT 许可证
+- `SECURITY.md` — 上游安全说明
+
 完整在线文档：<https://hermes-agent.nousresearch.com/docs/>
 
 ## 本项目专属文档

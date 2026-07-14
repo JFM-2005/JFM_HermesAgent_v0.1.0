@@ -139,6 +139,9 @@ docs/superpowers/*
 /workspace/checkpoints/
 # 运行时缓存 / 网关 / 看板状态（可重建）
 /workspace/models_dev_cache.json
+/workspace/provider_models_cache.json
+/workspace/ollama_cloud_models_cache.json
+/workspace/desktop-build-stamp.json
 /workspace/channel_directory.json
 /workspace/kanban.db
 /workspace/gateway.lock
@@ -185,6 +188,11 @@ RELEASE_v*.md
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
+
+# Local icon experiments / accidental build outputs
+apps/desktop/assets/icon-test.ico
+apps/desktop/src/**/*.js
+!apps/desktop/src/**/*.test.js
 
 # PR infographics are rendered locally and embedded in PR descriptions via the
 # image-provider (fal.media) URL — they are NEVER committed to the repo. The

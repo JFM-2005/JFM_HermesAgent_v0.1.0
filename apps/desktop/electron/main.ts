@@ -435,7 +435,22 @@ const WINDOW_BUTTON_POSITION = {
 // (pure + unit-testable); computeNativeOverlayWidth() applies it per platform.
 // It's only the pre-layout fallback — the renderer measures the exact overlay
 // width live via the Window Controls Overlay API.
+// Windows taskbar icons need a multi-size .ico; a large PNG often shows as a
+// generic placeholder when passed as a string path. Prefer platform-native
+// assets, then fall back to the renderer's apple-touch-icon.
 const APP_ICON_PATHS = [
+  ...(IS_WINDOWS
+    ? [
+        ...(process.resourcesPath ? [path.join(process.resourcesPath, 'icon.ico')] : []),
+        path.join(APP_ROOT, 'assets', 'icon.ico'),
+        path.join(unpackedPathFor(APP_ROOT), 'assets', 'icon.ico')
+      ]
+    : IS_MAC
+      ? [
+          path.join(APP_ROOT, 'assets', 'icon.icns'),
+          path.join(APP_ROOT, 'assets', 'icon.png')
+        ]
+      : []),
   path.join(APP_ROOT, 'public', 'apple-touch-icon.png'),
   path.join(APP_ROOT, 'dist', 'apple-touch-icon.png'),
   path.join(unpackedPathFor(APP_ROOT), 'dist', 'apple-touch-icon.png')
@@ -712,6 +727,28 @@ function previewFileMetadata(filePath, mimeType) {
 
 app.setName(APP_NAME)
 
+function resolveWindowsAppUserModelId() {
+  const brandedId = 'com.nousresearch.hermes'
+  // NSIS/MSI installs create a Start Menu shortcut whose AUMID matches build.appId.
+  // Portable win-unpacked runs and dev `electron .` launches do not. Setting the
+  // branded ID without that shortcut makes Windows show a blank taskbar icon
+  // instead of reading the rcedit-stamped EXE icon.
+  const startMenuShortcut = path.join(
+    app.getPath('appData'),
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+    'Hermes.lnk'
+  )
+
+  if (IS_PACKAGED && fs.existsSync(startMenuShortcut)) {
+    return brandedId
+  }
+
+  return process.execPath
+}
+
 // Windows toast notifications silently no-op unless an AppUserModelID is set:
 // `new Notification().show()` returns without error and nothing appears. The
 // AUMID must match the installed Start Menu shortcut's AUMID, which
@@ -720,7 +757,7 @@ app.setName(APP_NAME)
 // need this, so gate it on Windows. (Fixes: desktop approval/turn notifications
 // never firing on Windows.)
 if (IS_WINDOWS) {
-  app.setAppUserModelId('com.nousresearch.hermes')
+  app.setAppUserModelId(resolveWindowsAppUserModelId())
 }
 
 // Seed the native About panel with the live Hermes version. This is refreshed
@@ -4546,8 +4583,16 @@ function registerPowerResumeListeners() {
   }
 }
 
-function getAppIconPath() {
-  return APP_ICON_PATHS.find(fileExists)
+function getAppIcon() {
+  const iconPath = APP_ICON_PATHS.find(fileExists)
+
+  if (!iconPath) {
+    return undefined
+  }
+
+  const image = nativeImage.createFromPath(iconPath)
+
+  return image.isEmpty() ? undefined : image
 }
 
 function sendOpenUpdatesRequested() {
@@ -6554,7 +6599,7 @@ function spawnSecondaryWindow({
   watch,
   newSession
 }: { sessionId?: string; watch?: boolean; newSession?: boolean } = {}) {
-  const icon = getAppIconPath()
+  const icon = getAppIcon()
 
   const win = new BrowserWindow({
     width: SESSION_WINDOW_MIN_WIDTH,
@@ -6758,7 +6803,7 @@ function closePetOverlay() {
 }
 
 function createWindow() {
-  const icon = getAppIconPath()
+  const icon = getAppIcon()
   const savedWindowState = readWindowState()
   mainWindow = new BrowserWindow({
     ...computeWindowOptions(savedWindowState, screen.getAllDisplays()),

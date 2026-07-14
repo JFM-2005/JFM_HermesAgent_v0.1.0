@@ -1,6 +1,9 @@
-# JFM_HermesAgent_v0.1.0
+# JFM HermesAgent
 
-> 基于 [Hermes Agent](https://github.com/NousResearch/hermes-agent) **v0.18.2** 的 Windows 便携部署版本。  
+[![Release](https://img.shields.io/github/v/tag/JFM-2005/JFM_HermesAgent_v0.1.0?label=version)](https://github.com/JFM-2005/JFM_HermesAgent_v0.1.0/releases)
+[![Hermes upstream](https://img.shields.io/badge/upstream-v0.18.2-blue)](https://github.com/NousResearch/hermes-agent)
+
+> **v0.1.1** — 基于 [Hermes Agent](https://github.com/NousResearch/hermes-agent) **v0.18.2** 的 Windows 便携部署版本。  
 > 源码 + `workspace/` 数据同树存放，复制目录即可复现环境。
 
 <p align="center">
@@ -15,7 +18,8 @@
 | 模块 | 说明 |
 |------|------|
 | **CLI** | `run.ps1` 一键启动，数据写入 `workspace/` |
-| **桌面版** | `start-desktop.ps1` 自动拉起 SearXNG + Electron 桌面 |
+| **桌面版（开发）** | `start-desktop.ps1` — SearXNG + `--source` 模式 |
+| **桌面版（打包）** | `pack-desktop.ps1` → `start-desktop-pack.ps1` 绿色便携版 |
 | **LLM** | DeepSeek V4 Pro（主对话） |
 | **视觉** | GitHub Copilot GPT-5.4（`auxiliary.vision` 辅助看图） |
 | **搜索** | 本机 SearXNG（Docker，`127.0.0.1:8888`） |
@@ -29,6 +33,8 @@
 flowchart TB
   subgraph launch["启动层"]
     SD["start-desktop.ps1"]
+    PK["pack-desktop.ps1"]
+    SP["start-desktop-pack.ps1"]
     RP["run.ps1"]
   end
 
@@ -51,6 +57,8 @@ flowchart TB
 
   SD --> SX
   SD --> DESK
+  PK --> SP
+  SP --> DESK
   RP --> CLI
   DESK --> runtime
   CLI --> runtime
@@ -68,46 +76,86 @@ flowchart TB
 ### 1. 环境要求
 
 - Windows 10/11 + PowerShell
-- Python 3.11–3.13（项目内 `.venv`）
-- Node.js LTS（桌面版构建）
-- Docker Desktop（SearXNG）
+- Python 3.11–3.13（项目内 `.venv`，`uv sync --locked`）
+- Node.js LTS（桌面版构建，`npm ci`）
+- Docker Desktop（SearXNG，可选）
 - Clash 等代理（可选，npm/Electron 下载用）
 
-### 2. 配置密钥
+### 2. 克隆与配置
 
 ```powershell
-cd JFM_HermesAgent_v0.1.0   # 本地目录名可按需重命名
+git clone https://github.com/JFM-2005/JFM_HermesAgent_v0.1.0.git
+cd JFM_HermesAgent_v0.1.0
 Copy-Item workspace\.env.example workspace\.env
 # 编辑 workspace\.env，填入 DEEPSEEK_API_KEY 等（勿提交到 Git）
 ```
 
-### 3. 启动
+### 3. 日常启动
 
 ```powershell
 # CLI 交互
 .\run.ps1
 
-# 桌面版（推荐）
+# 桌面版（开发 / 改源码）
 .\start-desktop.ps1
 ```
 
-首次桌面版构建需 `npm ci`，国内网络请确保代理可用（`start-desktop.ps1` 已预设 Clash 7890 与国内镜像）。
+### 4. 打包 Windows 绿色便携版（v0.1.1+）
+
+与老师实验流程等价，本项目提供一键脚本（含国内镜像、进程占用、图标预检）：
+
+```powershell
+.\pack-desktop.ps1
+```
+
+或手动：
+
+```powershell
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
+npm ci
+uv sync --locked
+npm run desktop:package:portable:win
+```
+
+产物：`apps\desktop\release\win-unpacked\Hermes.exe`（需连同整个 `win-unpacked` 文件夹分发）
+
+打包后启动：
+
+```powershell
+.\start-desktop-pack.ps1
+```
 
 ---
 
 ## 目录结构
 
 ```
-JFM_HermesAgent_v0.1.0/
-├── run.ps1                 # CLI 便携启动器
-├── start-desktop.ps1       # 桌面版 + SearXNG 一键启动
-├── workspace/              # HERMES_HOME（配置、记忆、会话）
-│   ├── config.yaml         # 模型 / 搜索 / 视觉路由（无密钥）
-│   ├── .env.example        # 密钥模板
-│   └── memories/USER.md    # 用户偏好
-├── doc/original-readme/    # 上游官方 README 归档
-└── docs/images/            # README 用图
+JFM_HermesAgent_v0.1.0/          # 仓库名保留 v0.1.0；项目版本见 VERSION / Releases
+├── VERSION                      # 当前发行版号（0.1.1）
+├── CHANGELOG.md                 # 版本变更记录
+├── run.ps1                      # CLI 便携启动器
+├── start-desktop.ps1            # 开发桌面 + SearXNG
+├── pack-desktop.ps1             # Windows 绿色版打包
+├── start-desktop-pack.ps1       # 打包版启动
+├── workspace/                   # HERMES_HOME（配置、记忆、会话）
+│   ├── config.yaml
+│   ├── .env.example
+│   └── memories/USER.md
+├── doc/original-readme/         # 上游官方 README 归档
+└── docs/images/                 # README 用图
 ```
+
+---
+
+## 版本管理
+
+| 概念 | 说明 |
+|------|------|
+| **项目版本** | `VERSION` 文件与 [GitHub Releases](https://github.com/JFM-2005/JFM_HermesAgent_v0.1.0/releases) 标签 `v0.1.x` |
+| **上游版本** | Hermes Agent **v0.18.2**（见 `doc/original-readme/`） |
+| **分支** | `master` 为主开发分支；发行打标签 `v0.1.1`，不另开长期 release 分支 |
+| **变更日志** | [CHANGELOG.md](CHANGELOG.md) |
 
 ---
 
@@ -129,7 +177,7 @@ auxiliary:
 ```
 
 - DeepSeek 负责主对话；看图走 Copilot 辅助模型（需 `gh auth` / Copilot 可用）。
-- SearXNG 独立部署在 `D:\searxng`（可在 `start-desktop.ps1` 用 `-SearxngDir` 修改）。
+- SearXNG 默认 `D:\searxng`（`start-desktop.ps1 -SearxngDir` 可改）。
 
 ---
 

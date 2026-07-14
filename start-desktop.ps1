@@ -74,10 +74,21 @@ function Start-SearxngStack {
 
     Write-Step "start SearXNG: $Dir"
     Push-Location $Dir
-    & docker compose up -d
-    if ($LASTEXITCODE -ne 0) {
+    # Docker Compose writes progress to stderr; with $ErrorActionPreference='Stop'
+    # PowerShell treats that as a terminating NativeCommandError even on success.
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & docker compose up -d
+        $composeExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($composeExit -ne 0) {
         Pop-Location
-        throw "docker compose up -d failed (exit $LASTEXITCODE)"
+        Write-Log "WARN: docker compose up -d failed (exit $composeExit)" Yellow
+        Write-Log "WARN: start Docker Desktop, or run: .\start-desktop.ps1 -SkipSearxng" Yellow
+        return
     }
 
     $deadline = (Get-Date).AddSeconds(45)
